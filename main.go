@@ -30,7 +30,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -125,6 +127,7 @@ type PromptFeedback struct {
 var (
 	jsonOutput bool
 	client     *http.Client
+	outputMutex sync.Mutex
 )
 
 // loadEnvFile .env dosyasını yükler
@@ -167,7 +170,9 @@ func loadEnvFile() {
 // log JSON modunda sessiz, normal modda yazdırır
 func log(format string, args ...interface{}) {
 	if !jsonOutput {
+		outputMutex.Lock()
 		fmt.Printf(format+"\n", args...)
+		outputMutex.Unlock()
 	}
 }
 
@@ -208,7 +213,7 @@ func createHTTPClient() *http.Client {
 }
 
 // getSessionCookies session başlatır
-func getSessionCookies() error {
+func getSessionCookies(client *http.Client) error {
 	log("🔗 Session başlatılıyor...")
 
 	req, err := http.NewRequest("GET", config.BaseURL+"/", nil)
@@ -236,7 +241,7 @@ func getSessionCookies() error {
 }
 
 // getCaptcha CAPTCHA resmini indirir
-func getCaptcha() ([]byte, error) {
+func getCaptcha(client *http.Client) ([]byte, error) {
 	timestamp := fmt.Sprintf("0.%08d %d", time.Now().UnixNano()%100000000, time.Now().Unix())
 	captchaURL := fmt.Sprintf("%s%s?_CAPTCHA=&t=%s", config.BaseURL, config.CaptchaPath, url.QueryEscape(timestamp))
 
@@ -322,7 +327,7 @@ func solveCaptchaWithGemini(imageData []byte, apiKey string) (string, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("Gemini API isteği başarısız: %v", err)
+		return "", fmt.Errorf("gemini API isteği başarısız: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -333,11 +338,11 @@ func solveCaptchaWithGemini(imageData []byte, apiKey string) (string, error) {
 
 	if resp.StatusCode != 200 {
 		if resp.StatusCode == 429 {
-			return "", fmt.Errorf("Gemini API kota aşıldı")
+			return "", fmt.Errorf("gemini API kota aşıldı")
 		} else if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			return "", fmt.Errorf("Gemini API yetkilendirme hatası")
+			return "", fmt.Errorf("gemini API yetkilendirme hatası")
 		}
-		return "", fmt.Errorf("Gemini API hatası: HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("gemini API hatası: HTTP %d", resp.StatusCode)
 	}
 
 	var geminiResp GeminiResponse
@@ -346,20 +351,20 @@ func solveCaptchaWithGemini(imageData []byte, apiKey string) (string, error) {
 	}
 
 	if geminiResp.PromptFeedback != nil && geminiResp.PromptFeedback.BlockReason != "" {
-		return "", fmt.Errorf("Gemini güvenlik filtresi: %s", geminiResp.PromptFeedback.BlockReason)
+		return "", fmt.Errorf("gemini güvenlik filtresi: %s", geminiResp.PromptFeedback.BlockReason)
 	}
 
 	if len(geminiResp.Candidates) == 0 {
-		return "", fmt.Errorf("Gemini API boş yanıt döndü")
+		return "", fmt.Errorf("gemini API boş yanıt döndü")
 	}
 
 	candidate := geminiResp.Candidates[0]
 	if candidate.FinishReason != "" && candidate.FinishReason != "STOP" {
-		return "", fmt.Errorf("Gemini yanıt tamamlanamadı: %s", candidate.FinishReason)
+		return "", fmt.Errorf("gemini yanıt tamamlanamadı: %s", candidate.FinishReason)
 	}
 
 	if len(candidate.Content.Parts) == 0 {
-		return "", fmt.Errorf("Gemini API metin yanıtı vermedi")
+		return "", fmt.Errorf("gemini API metin yanıtı vermedi")
 	}
 
 	text := candidate.Content.Parts[0].Text
@@ -376,7 +381,7 @@ func solveCaptchaWithGemini(imageData []byte, apiKey string) (string, error) {
 }
 
 // sorgulaSite BTK sorgusu yapar
-func sorgulaSite(domain, captchaCode string) (string, error) {
+func sorgulaSite(client *http.Client, domain, captchaCode string) (string, error) {
 	log("\n🔍 Sorgulanıyor: %s", domain)
 
 	formData := url.Values{
@@ -501,6 +506,9 @@ func cleanHTML(html string) string {
 
 // printResult sonucu güzel formatta yazdırır
 func printResult(domain string, result QueryResult, durationMs int64) {
+	outputMutex.Lock()
+	defer outputMutex.Unlock()
+
 	fmt.Println()
 	fmt.Println(strings.Repeat("═", 60))
 	fmt.Printf("📌 Domain: %s\n", domain)
@@ -551,7 +559,9 @@ func printResult(domain string, result QueryResult, durationMs int64) {
 func outputJSON(result QueryResult) {
 	result.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	jsonData, _ := json.MarshalIndent(result, "", "  ")
+	outputMutex.Lock()
 	fmt.Println(string(jsonData))
+	outputMutex.Unlock()
 }
 
 // outputJSONError JSON formatında hata çıktısı verir
@@ -563,7 +573,9 @@ func outputJSONError(domain, message string) {
 		Error:     message,
 	}
 	jsonData, _ := json.MarshalIndent(result, "", "  ")
+	outputMutex.Lock()
 	fmt.Println(string(jsonData))
+	outputMutex.Unlock()
 }
 
 // readDomainsFromFile dosyadan domain listesi okur
@@ -622,16 +634,16 @@ API Anahtarı Alma:
 }
 
 // querySingleDomain tek domain sorgular
-func querySingleDomain(domain string, apiKey string) QueryResult {
+func querySingleDomain(domain string, apiKey string, client *http.Client) QueryResult {
 	startTime := time.Now()
 
 	// Session başlat (cookie jar'da saklanır)
-	if err := getSessionCookies(); err != nil {
+	if err := getSessionCookies(client); err != nil {
 		return QueryResult{Domain: domain, Status: false, Error: err.Error()}
 	}
 
 	// CAPTCHA al
-	imageData, err := getCaptcha()
+	imageData, err := getCaptcha(client)
 	if err != nil {
 		return QueryResult{Domain: domain, Status: false, Error: err.Error()}
 	}
@@ -643,7 +655,7 @@ func querySingleDomain(domain string, apiKey string) QueryResult {
 	}
 
 	// Sorgu yap
-	html, err := sorgulaSite(domain, captchaCode)
+	html, err := sorgulaSite(client, domain, captchaCode)
 	if err != nil {
 		return QueryResult{Domain: domain, Status: false, Error: err.Error()}
 	}
@@ -658,6 +670,47 @@ func querySingleDomain(domain string, apiKey string) QueryResult {
 	result.Domain = domain
 	result.QueryDuration = time.Since(startTime).Milliseconds()
 	result.QueryDurationFormatted = formatDuration(result.QueryDuration)
+
+	return result
+}
+
+// processDomain domain sorgular ve retry mekanizması ile sonucu döndürür
+func processDomain(domain string, apiKey string) QueryResult {
+	var result QueryResult
+	var lastErr error
+
+	// Retry mekanizması
+	for retry := 0; retry < config.MaxRetries; retry++ {
+		if retry > 0 {
+			log("🔄 Yeniden deneniyor (%d/%d)...", retry, config.MaxRetries)
+			time.Sleep(config.RetryDelay)
+		}
+
+		// Her retry için yeni client oluştur
+		client := createHTTPClient()
+
+		result = querySingleDomain(domain, apiKey, client)
+
+		if result.Status {
+			lastErr = nil
+			break
+		}
+
+		lastErr = fmt.Errorf("%s", result.Error)
+
+		// CAPTCHA hatası değilse retry yapma
+		if !strings.Contains(result.Error, "CAPTCHA") {
+			break
+		}
+	}
+
+	if lastErr != nil {
+		result = QueryResult{
+			Domain: domain,
+			Status: false,
+			Error:  lastErr.Error(),
+		}
+	}
 
 	return result
 }
@@ -790,48 +843,55 @@ func main() {
 	log("📋 Sorgulanacak %d site: %s", len(validDomains), strings.Join(validDomains, ", "))
 	log("🤖 Model: %s\n", config.GeminiModel)
 
+	// Thread sayısını sor
+	fmt.Print("Kaç thread kullanmak istiyorsunuz? (varsayılan 1): ")
+	var numThreadsStr string
+	fmt.Scanln(&numThreadsStr)
+	numThreads := 1
+	if numThreadsStr != "" {
+		if n, err := strconv.Atoi(numThreadsStr); err == nil && n > 0 {
+			numThreads = n
+		}
+	}
+	log("🧵 Kullanılacak thread sayısı: %d\n", numThreads)
+
 	// Sorguları yap
 	var results []QueryResult
 	blocked := 0
 	accessible := 0
 
-	for i, domain := range validDomains {
-		var result QueryResult
-		var lastErr error
+	var progressMutex sync.Mutex
+	processed := 0
 
-		// Retry mekanizması
-		for retry := 0; retry < config.MaxRetries; retry++ {
-			if retry > 0 {
-				log("🔄 Yeniden deneniyor (%d/%d)...", retry, config.MaxRetries)
-				time.Sleep(config.RetryDelay)
-				// Yeni client oluştur (yeni session için)
-				client = createHTTPClient()
-			}
+	resultsChan := make(chan QueryResult, len(validDomains))
+	semaphore := make(chan struct{}, numThreads)
+	var wg sync.WaitGroup
 
-			result = querySingleDomain(domain, apiKey)
+	// Goroutine'leri başlat
+	for _, domain := range validDomains {
+		wg.Add(1)
+		go func(d string) {
+			defer wg.Done()
+			semaphore <- struct{}{} // Semaphore acquire
+			defer func() { <-semaphore }() // Semaphore release
+			result := processDomain(d, apiKey)
+			resultsChan <- result
+		}(domain)
+	}
 
-			if result.Status {
-				lastErr = nil
-				break
-			}
+	// Sonuçları topla ve yazdır
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
 
-			lastErr = fmt.Errorf(result.Error)
-
-			// CAPTCHA hatası değilse retry yapma
-			if !strings.Contains(result.Error, "CAPTCHA") {
-				break
-			}
-		}
-
-		if lastErr != nil {
-			result = QueryResult{
-				Domain: domain,
-				Status: false,
-				Error:  lastErr.Error(),
-			}
-		}
-
+	for result := range resultsChan {
 		results = append(results, result)
+
+		progressMutex.Lock()
+		processed++
+		log("📊 İşlenen: %d/%d", processed, len(validDomains))
+		progressMutex.Unlock()
 
 		if result.Status {
 			if result.EngelliMi {
@@ -839,23 +899,23 @@ func main() {
 			} else {
 				accessible++
 			}
+		}
+	}
 
+	// Tüm sonuçları yazdır
+	for _, result := range results {
+		if result.Status {
 			if jsonOutput {
 				outputJSON(result)
 			} else {
-				printResult(domain, result, result.QueryDuration)
+				printResult(result.Domain, result, result.QueryDuration)
 			}
 		} else {
 			if jsonOutput {
-				outputJSONError(domain, result.Error)
+				outputJSONError(result.Domain, result.Error)
 			} else {
-				fmt.Fprintf(os.Stderr, "❌ %s sorgulanırken hata: %s\n", domain, result.Error)
+				fmt.Fprintf(os.Stderr, "❌ %s sorgulanırken hata: %s\n", result.Domain, result.Error)
 			}
-		}
-
-		// Rate limiting
-		if i < len(validDomains)-1 {
-			time.Sleep(500 * time.Millisecond)
 		}
 	}
 

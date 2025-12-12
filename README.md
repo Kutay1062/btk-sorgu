@@ -120,6 +120,9 @@ btk-sorgu discord.com
 # Birden fazla site
 btk-sorgu discord.com twitter.com google.com
 
+# Birden fazla threads ile sorgula
+./btk-sorgu --threads 10 discord.com twitter.com
+
 # Dosyadan liste okuma
 btk-sorgu --liste sites.txt
 
@@ -128,6 +131,7 @@ btk-sorgu --json discord.com
 
 # Dosyaya kaydet
 btk-sorgu --json discord.com > sonuc.json
+
 ```
 
 ### Versiyon ve Yardım

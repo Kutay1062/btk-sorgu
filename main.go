@@ -30,7 +30,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -126,7 +125,8 @@ type PromptFeedback struct {
 
 // Global değişkenler
 var (
-	jsonOutput bool
+	jsonOutput  bool
+	geminiClient = &http.Client{Timeout: config.RequestTimeout}
 )
 
 // loadEnvFile .env dosyasını yükler
@@ -322,7 +322,6 @@ func solveCaptchaWithGemini(imageData []byte, apiKey string) (string, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-goog-api-key", apiKey)
 
-	geminiClient := &http.Client{Timeout: config.RequestTimeout}
 	resp, err := geminiClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("gemini API isteği başarısız: %v", err)
@@ -724,11 +723,13 @@ func main() {
 		showVersion bool
 		showHelpArg bool
 		tuiMode     bool
+		numThreads  int
 	)
 
 	flag.StringVar(&listFile, "liste", "", "Dosyadan site listesi oku")
 	flag.BoolVar(&jsonOutput, "json", false, "JSON formatında çıktı")
 	flag.BoolVar(&tuiMode, "tui", false, "TUI modunda çalıştır")
+	flag.IntVar(&numThreads, "threads", 1, "Kullanılacak thread sayısı")
 	flag.BoolVar(&showVersion, "version", false, "Versiyon bilgisini göster")
 	flag.BoolVar(&showVersion, "v", false, "Versiyon bilgisini göster")
 	flag.BoolVar(&showHelpArg, "help", false, "Yardım mesajını göster")
@@ -829,18 +830,7 @@ func main() {
 ╚════════════════════════════════════════════════════════════╝
 `)
 	log("📋 Sorgulanacak %d site: %s", len(validDomains), strings.Join(validDomains, ", "))
-	log("🤖 Model: %s\n", config.GeminiModel)
-
-	// Thread sayısını sor
-	fmt.Print("Kaç thread kullanmak istiyorsunuz? (varsayılan 1): ")
-	var numThreadsStr string
-	fmt.Scanln(&numThreadsStr)
-	numThreads := 1
-	if numThreadsStr != "" {
-		if n, err := strconv.Atoi(numThreadsStr); err == nil && n > 0 {
-			numThreads = n
-		}
-	}
+	log("🤖 Model: %s", config.GeminiModel)
 	log("🧵 Kullanılacak thread sayısı: %d\n", numThreads)
 
 	var results []QueryResult

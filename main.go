@@ -33,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -126,8 +127,6 @@ type PromptFeedback struct {
 // Global değişkenler
 var (
 	jsonOutput bool
-	client     *http.Client
-	outputMutex sync.Mutex
 )
 
 // loadEnvFile .env dosyasını yükler
@@ -170,9 +169,7 @@ func loadEnvFile() {
 // log JSON modunda sessiz, normal modda yazdırır
 func log(format string, args ...interface{}) {
 	if !jsonOutput {
-		outputMutex.Lock()
 		fmt.Printf(format+"\n", args...)
-		outputMutex.Unlock()
 	}
 }
 
@@ -325,7 +322,8 @@ func solveCaptchaWithGemini(imageData []byte, apiKey string) (string, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-goog-api-key", apiKey)
 
-	resp, err := client.Do(req)
+	geminiClient := &http.Client{Timeout: config.RequestTimeout}
+	resp, err := geminiClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("gemini API isteği başarısız: %v", err)
 	}
@@ -506,9 +504,6 @@ func cleanHTML(html string) string {
 
 // printResult sonucu güzel formatta yazdırır
 func printResult(domain string, result QueryResult, durationMs int64) {
-	outputMutex.Lock()
-	defer outputMutex.Unlock()
-
 	fmt.Println()
 	fmt.Println(strings.Repeat("═", 60))
 	fmt.Printf("📌 Domain: %s\n", domain)
@@ -559,9 +554,7 @@ func printResult(domain string, result QueryResult, durationMs int64) {
 func outputJSON(result QueryResult) {
 	result.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	jsonData, _ := json.MarshalIndent(result, "", "  ")
-	outputMutex.Lock()
 	fmt.Println(string(jsonData))
-	outputMutex.Unlock()
 }
 
 // outputJSONError JSON formatında hata çıktısı verir
@@ -573,9 +566,7 @@ func outputJSONError(domain, message string) {
 		Error:     message,
 	}
 	jsonData, _ := json.MarshalIndent(result, "", "  ")
-	outputMutex.Lock()
 	fmt.Println(string(jsonData))
-	outputMutex.Unlock()
 }
 
 // readDomainsFromFile dosyadan domain listesi okur
@@ -832,9 +823,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// HTTP client oluştur
-	client = createHTTPClient()
-
 	log(`
 ╔════════════════════════════════════════════════════════════╗
 ║           BTK Site Sorgulama Aracı                         ║
@@ -855,13 +843,11 @@ func main() {
 	}
 	log("🧵 Kullanılacak thread sayısı: %d\n", numThreads)
 
-	// Sorguları yap
 	var results []QueryResult
 	blocked := 0
 	accessible := 0
 
-	var progressMutex sync.Mutex
-	processed := 0
+	var processed int64
 
 	resultsChan := make(chan QueryResult, len(validDomains))
 	semaphore := make(chan struct{}, numThreads)
@@ -888,10 +874,8 @@ func main() {
 	for result := range resultsChan {
 		results = append(results, result)
 
-		progressMutex.Lock()
-		processed++
-		log("📊 İşlenen: %d/%d", processed, len(validDomains))
-		progressMutex.Unlock()
+		processedCount := atomic.AddInt64(&processed, 1)
+		log("📊 İşlenen: %d/%d", processedCount, len(validDomains))
 
 		if result.Status {
 			if result.EngelliMi {

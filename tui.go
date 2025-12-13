@@ -105,19 +105,19 @@ const (
 
 // TUI model
 type tuiModel struct {
-	state          tuiState
-	textInput      textinput.Model
-	spinner        spinner.Model
-	table          table.Model
-	results        []QueryResult
-	currentMsg     string
-	err            error
-	width          int
-	height         int
-	apiKey         string
-	queryDomain    string
-	refreshingIdx  int  // Güncellenen sorgunun index'i (-1 = yeni sorgu)
-	inputFocused   bool // Input mu yoksa tablo mu odaklı
+	state         tuiState
+	textInput     textinput.Model
+	spinner       spinner.Model
+	table         table.Model
+	results       []QueryResult
+	currentMsg    string
+	err           error
+	width         int
+	height        int
+	apiKey        string
+	queryDomain   string
+	refreshingIdx int  // Güncellenen sorgunun index'i (-1 = yeni sorgu)
+	inputFocused  bool // Input mu yoksa tablo mu odaklı
 }
 
 // Mesaj tipleri
@@ -358,9 +358,9 @@ func (m *tuiModel) updateTable() {
 func (m tuiModel) startQuery(domain string) tea.Cmd {
 	return func() tea.Msg {
 		// HTTP client oluştur
-		client = createHTTPClient()
+		client := createHTTPClient()
 
-		result := querySingleDomain(domain, m.apiKey)
+		result := querySingleDomain(domain, m.apiKey, client)
 		if !result.Status {
 			return queryErrorMsg{err: fmt.Errorf(result.Error)}
 		}
